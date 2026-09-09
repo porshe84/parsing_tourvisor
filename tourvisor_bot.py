@@ -80,6 +80,15 @@ def fetch_tours():
 
 def send_telegram(message):
     print(f"[TELEGRAM to @ehsrop48]:\n{message}")
+    token = '8716203026:AAFEeNjtR_bPRFY7o1Mv-OOpTuIehtDolas'
+    chat_id = '@ehsrop48'
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        resp = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=10)
+        if resp.status_code != 200:
+            print("Telegram Error:", resp.text)
+    except Exception as e:
+        print("Failed to send Telegram message:", e)
 
 def send_email(subject, body):
     print(f"[EMAIL to supercuper@mail.ru]:\nSubject: {subject}\nBody: {body}")
