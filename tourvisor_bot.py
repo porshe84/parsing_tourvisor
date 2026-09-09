@@ -19,9 +19,20 @@ def init_db():
             hotel_id INTEGER,
             hotel_name TEXT,
             price INTEGER,
-            tour_info TEXT
+            flydate TEXT,
+            link TEXT
         )
     ''')
+
+    # Also we might need to add these columns if the table exists
+    try:
+        c.execute('ALTER TABLE results ADD COLUMN flydate TEXT')
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute('ALTER TABLE results ADD COLUMN link TEXT')
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
@@ -68,11 +79,16 @@ def fetch_tours():
 
     tours = []
     for h in hotels:
+        flydate = ""
+        if 'tours' in h and 'tour' in h['tours'] and len(h['tours']['tour']) > 0:
+            flydate = h['tours']['tour'][0].get('flydate', '')
+
         tours.append({
             'hotel_id': h.get('hotelcode'),
             'hotel_name': h.get('hotelname'),
             'price': h.get('price'),
-            'tour_info': h.get('hoteldescription', '')
+            'flydate': flydate,
+            'link': h.get('fulldesclink', f"https://tourvisor.ru/countries#!/hotel={h.get('hotelcode')}")
         })
 
     tours.sort(key=lambda x: x['price'])
@@ -118,9 +134,9 @@ def check_and_save_tours(tours):
                 send_email(f"Price Drop: {hotel_name}", msg)
 
         c.execute('''
-            INSERT INTO results (timestamp, hotel_id, hotel_name, price, tour_info)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (now, hotel_id, hotel_name, current_price, t['tour_info']))
+            INSERT INTO results (timestamp, hotel_id, hotel_name, price, flydate, link)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (now, hotel_id, hotel_name, current_price, t.get('flydate', ''), t.get('link', '')))
 
     conn.commit()
     conn.close()
@@ -142,6 +158,8 @@ def generate_html(tours):
         th { background-color: #027ad0; color: white; }
         tr:nth-child(even) { background-color: #f2f2f2; }
         .update-time { color: #555; font-size: 0.9em; }
+        a { color: #027ad0; text-decoration: none; font-weight: bold; }
+        a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -152,17 +170,16 @@ def generate_html(tours):
             <th>Rank</th>
             <th>Hotel</th>
             <th>Price (RUB)</th>
-            <th>Description</th>
+            <th>Fly Date</th>
         </tr>
 """
 
     for i, t in enumerate(tours, 1):
-        info = t['tour_info'] if t['tour_info'] else ''
         html += f"""        <tr>
             <td>{i}</td>
-            <td>{t['hotel_name']}</td>
+            <td><a href="{t['link']}" target="_blank">{t['hotel_name']}</a></td>
             <td>{t['price']:,}</td>
-            <td>{info}</td>
+            <td>{t['flydate']}</td>
         </tr>
 """
 
