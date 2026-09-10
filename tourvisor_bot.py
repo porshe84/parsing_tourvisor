@@ -3,6 +3,7 @@ import requests
 import datetime
 import time
 import schedule
+import json
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -181,6 +182,26 @@ def generate_html(tours):
     conn = sqlite3.connect('tours.db')
     c = conn.cursor()
 
+    hotel_ids = [str(t['hotel_id']) for t in tours]
+    placeholders = ','.join('?' * len(hotel_ids))
+
+    # Extract unique timestamps for the shared X-axis
+    c.execute(f'''
+        SELECT DISTINCT timestamp
+        FROM results
+        WHERE hotel_id IN ({placeholders})
+        ORDER BY timestamp ASC
+    ''', hotel_ids)
+
+    raw_timestamps = [row[0] for row in c.fetchall()]
+    # Format labels for the chart
+    chart_labels = []
+    for ts in raw_timestamps:
+        dt_obj = datetime.datetime.fromisoformat(ts)
+        chart_labels.append(dt_obj.strftime("%d.%m %H:%M"))
+
+    chart_datasets = []
+
     html = """<!DOCTYPE html>
 <html>
 <head>
@@ -195,7 +216,9 @@ def generate_html(tours):
         .update-time { color: #555; font-size: 0.9em; }
         a { color: #027ad0; text-decoration: none; font-weight: bold; }
         a:hover { text-decoration: underline; }
+        .chart-container { width: 100%; height: 500px; margin-top: 40px; }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <h2>Top 15 Tours (Turkey from Yekaterinburg, 10 nights)</h2>
@@ -227,6 +250,21 @@ def generate_html(tours):
         else:
             history_tooltip += "No previous data."
 
+        # Build dataset for chart
+        c.execute('SELECT timestamp, price FROM results WHERE hotel_id = ? ORDER BY timestamp ASC', (hotel_id,))
+        hotel_history = {row[0]: row[1] for row in c.fetchall()}
+
+        data_points = []
+        for ts in raw_timestamps:
+            data_points.append(hotel_history.get(ts, None))
+
+        chart_datasets.append({
+            'label': t['hotel_name'],
+            'data': data_points,
+            'fill': False,
+            'tension': 0.1
+        })
+
         html += f"""        <tr>
             <td>{i}</td>
             <td><a href="{t['link']}" target="_blank" title="{history_tooltip}">{t['hotel_name']}</a></td>
@@ -239,11 +277,100 @@ def generate_html(tours):
     conn.close()
 
     html += """    </table>
+
+    <div class="chart-container">
+        <canvas id="priceChart"></canvas>
+    </div>
+
+    <script>
+        const ctx = document.getElementById('priceChart').getContext('2d');
+        const chartLabels = {chart_labels_json};
+        const chartDatasets = {chart_datasets_json};
+
+        const myChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: chartLabels,
+                datasets: chartDatasets
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'История изменения цен'
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    legend: {
+                        position: 'right',
+                        onClick: function(e, legendItem, legend) {
+                            const index = legendItem.datasetIndex;
+                            const ci = legend.chart;
+
+                            // Check if the clicked dataset is currently the *only* visible dataset.
+                            let visibleCount = 0;
+                            let isTargetVisible = false;
+
+                            ci.data.datasets.forEach((ds, i) => {
+                                if (ci.isDatasetVisible(i)) {
+                                    visibleCount++;
+                                    if (i === index) {
+                                        isTargetVisible = true;
+                                    }
+                                }
+                            });
+
+                            const isIsolated = isTargetVisible && visibleCount === 1;
+
+                            if (!isIsolated) {
+                                // Isolate it.
+                                ci.data.datasets.forEach((ds, i) => {
+                                    if (i === index) {
+                                        ci.show(i);
+                                    } else {
+                                        ci.hide(i);
+                                    }
+                                });
+                            } else {
+                                // Restore all.
+                                ci.data.datasets.forEach((ds, i) => {
+                                    ci.show(i);
+                                });
+                            }
+                            ci.update();
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: 'Дата и время опроса'
+                        }
+                    },
+                    y: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: 'Цена (RUB)'
+                        }
+                    }
+                }
+            }
+        });
+    </script>
 </body>
 </html>"""
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     html = html.replace("{update_time}", now)
+    html = html.replace("{chart_labels_json}", json.dumps(chart_labels))
+    html = html.replace("{chart_datasets_json}", json.dumps(chart_datasets))
 
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html)
