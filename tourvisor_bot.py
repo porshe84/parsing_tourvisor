@@ -49,7 +49,7 @@ def fetch_tours():
     search_url = f"https://tourvisor.ru/xml/modsearch.php?datefrom={df_str}&dateto={dt_str}&directflight=0&regular=1&nightsfrom=10&nightsto=10&adults=2&child=2&childage=7,14&meal=7,9&rating=4.5&stars=5,6&country=4&departure=3&pricefrom=0&priceto=0&currency=0&formmode=0&pricetype=0"
 
     try:
-        resp = requests.get(search_url, headers=HEADERS, timeout=10)
+        resp = requests.get(search_url, headers=HEADERS, timeout=30)
         reqid = resp.json()['result']['requestid']
     except Exception as e:
         print("Error initiating search:", e)
@@ -58,11 +58,11 @@ def fetch_tours():
     print(f"Request ID: {reqid}, polling...")
 
     hotels = []
-    for _ in range(15): # poll up to ~30s
+    for _ in range(25): # poll up to ~50s
         time.sleep(2)
         res_url = f"https://tourvisor.ru/xml/result.php?requestid={reqid}&type=result&format=json"
         try:
-            res_resp = requests.get(res_url, headers=HEADERS, timeout=10)
+            res_resp = requests.get(res_url, headers=HEADERS, timeout=30)
             res_data = res_resp.json()
             status = res_data.get('data', {}).get('status', {})
 
@@ -80,15 +80,20 @@ def fetch_tours():
     tours = []
     for h in hotels:
         flydate = ""
+        tour_link = f"https://tourvisor.ru/countries#!/hotel={h.get('hotelcode')}"
         if 'tours' in h and 'tour' in h['tours'] and len(h['tours']['tour']) > 0:
-            flydate = h['tours']['tour'][0].get('flydate', '')
+            first_tour = h['tours']['tour'][0]
+            flydate = first_tour.get('flydate', '')
+            tourid = first_tour.get('tourid', '')
+            if tourid:
+                tour_link = f"https://tourvisor.ru/tours/turkey/ekaterinburg#tvtourid={tourid}"
 
         tours.append({
             'hotel_id': h.get('hotelcode'),
             'hotel_name': h.get('hotelname'),
             'price': h.get('price'),
             'flydate': flydate,
-            'link': h.get('fulldesclink', f"https://tourvisor.ru/countries#!/hotel={h.get('hotelcode')}")
+            'link': tour_link
         })
 
     tours.sort(key=lambda x: x['price'])
