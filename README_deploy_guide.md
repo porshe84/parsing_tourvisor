@@ -51,9 +51,9 @@ pip install requests schedule flask
    Environment="TELEGRAM_BOT_TOKEN=ВАШ_ТОКЕН_ЗДЕСЬ"
    # Environment="TELEGRAM_CHAT_ID=ВАШ_ID"
 
-   # Часовой пояс сервера может быть UTC. Тогда 04:00 и 15:00 UTC = 07:00 и 18:00 MSK.
-   # Environment="SCHEDULE_TIME_1=04:00"
-   # Environment="SCHEDULE_TIME_2=15:00"
+   # Если время на сервере московское (MSK), укажите нужные часы:
+   # Environment="SCHEDULE_TIME_1=07:00"
+   # Environment="SCHEDULE_TIME_2=18:00"
 
    ExecStart=/var/lib/postgresql/tourvisor_bot/venv/bin/python3 app.py
    Restart=always

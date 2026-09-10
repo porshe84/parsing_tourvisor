@@ -457,7 +457,7 @@ def generate_html(tours):
 </body>
 </html>"""
 
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     html = html.replace("{update_time}", now)
     html = html.replace("{chart_labels_json}", json.dumps(chart_labels))
     html = html.replace("{chart_datasets_json}", json.dumps(chart_datasets))
@@ -488,9 +488,20 @@ def index():
 def add_hotel():
     hotel_input = request.form.get('hotel_input', '')
     hotel_id = ""
+    hotel_name = "Unknown Hotel"
+
     # Extract ID from link if provided, otherwise assume it's an ID
     if "hotel=" in hotel_input:
         hotel_id = hotel_input.split("hotel=")[-1].split("&")[0].split("#")[0]
+    elif "tvtourid=" in hotel_input:
+        tour_id = hotel_input.split("tvtourid=")[-1].split("&")[0].split("#")[0]
+        try:
+            r = requests.get(f"https://tourvisor.ru/xml/actualize.php?tourid={tour_id}&format=json", headers=HEADERS, timeout=10)
+            data = r.json()
+            hotel_id = data.get('data', {}).get('tour', {}).get('hotelcode', '')
+            hotel_name = data.get('data', {}).get('tour', {}).get('hotelname', 'Unknown Hotel')
+        except:
+            pass
     else:
         hotel_id = hotel_input.strip()
 
@@ -500,6 +511,9 @@ def add_hotel():
         c.execute('INSERT OR IGNORE INTO manual_hotels (hotel_id) VALUES (?)', (int(hotel_id),))
         conn.commit()
         conn.close()
+
+        msg = f"✅ Добавлен новый отель для отслеживания!\nID: {hotel_id}\nНазвание: {hotel_name}"
+        send_telegram(msg)
 
         # Trigger an immediate run in a background thread so UI doesn't block
         threading.Thread(target=run_job, daemon=True).start()
