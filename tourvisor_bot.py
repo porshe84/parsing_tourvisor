@@ -46,7 +46,7 @@ def fetch_tours():
 
     print(f"Searching tours from {df_str} to {dt_str}...")
 
-    search_url = f"https://tourvisor.ru/xml/modsearch.php?datefrom={df_str}&dateto={dt_str}&directflight=0&regular=1&nightsfrom=10&nightsto=10&adults=2&child=2&childage=7,14&meal=7,9&rating=4.5&stars=5,6&country=4&departure=3&pricefrom=0&priceto=0&currency=0&formmode=0&pricetype=0"
+    search_url = f"https://tourvisor.ru/xml/modsearch.php?datefrom={df_str}&dateto={dt_str}&directflight=0&regular=1&nightsfrom=10&nightsto=10&adults=2&child=2&childage1=7&childage2=14&meal=7,9&rating=4.5&stars=5,6&country=4&departure=3&pricefrom=0&priceto=0&currency=0&formmode=0&pricetype=0"
 
     try:
         resp = requests.get(search_url, headers=HEADERS, timeout=30)
@@ -101,7 +101,11 @@ def fetch_tours():
 
 def send_telegram(message):
     print(f"[TELEGRAM to @ehsrop48]:\n{message}")
-    token = '8716203026:AAFEeNjtR_bPRFY7o1Mv-OOpTuIehtDolas'
+    import os
+    token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    if not token:
+        print("Error: TELEGRAM_BOT_TOKEN environment variable not set.")
+        return
     chat_id = '@ehsrop48'
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
@@ -214,9 +218,13 @@ if __name__ == "__main__":
     # Run once at startup
     run_job()
 
-    # Schedule logic
-    schedule.every().day.at("04:00").do(run_job)
-    schedule.every().day.at("15:00").do(run_job)
+    import os
+    # Schedule logic - assuming script runs on UTC time, this corresponds to 07:00 and 18:00 MSK (UTC+3)
+    # Alternatively user can set SCHEDULE_TIME_1 and SCHEDULE_TIME_2 based on server timezone
+    t1 = os.environ.get("SCHEDULE_TIME_1", "04:00")
+    t2 = os.environ.get("SCHEDULE_TIME_2", "15:00")
+    schedule.every().day.at(t1).do(run_job)
+    schedule.every().day.at(t2).do(run_job)
 
     print("Scheduler started. Waiting for jobs...")
     while True:
