@@ -4,6 +4,18 @@ import datetime
 import time
 import schedule
 import json
+import threading
+from flask import Flask, request, jsonify, send_file, render_template_string
+
+app = Flask(__name__)
+
+# Moving the contents of tourvisor_bot.py over to app.py
+import sqlite3
+import requests
+import datetime
+import time
+import schedule
+import json
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -21,7 +33,14 @@ def init_db():
             hotel_name TEXT,
             price INTEGER,
             flydate TEXT,
-            link TEXT
+            link TEXT,
+            usd_rate REAL
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS manual_hotels (
+            hotel_id INTEGER PRIMARY KEY
         )
     ''')
 
@@ -34,20 +53,23 @@ def init_db():
         c.execute('ALTER TABLE results ADD COLUMN link TEXT')
     except sqlite3.OperationalError:
         pass
+    try:
+        c.execute('ALTER TABLE results ADD COLUMN usd_rate REAL')
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
-def fetch_tours():
-    today = datetime.date.today()
-    date_from = today + datetime.timedelta(days=30)
-    date_to = date_from + datetime.timedelta(days=7)
+def get_usd_rate():
+    try:
+        r = requests.get("https://www.cbr-xml-daily.ru/daily_json.js", timeout=10)
+        return r.json()['Valute']['USD']['Value']
+    except:
+        return 0.0
 
-    df_str = date_from.strftime("%d.%m.%Y")
-    dt_str = date_to.strftime("%d.%m.%Y")
-
-    print(f"Searching tours from {df_str} to {dt_str}...")
-
-    search_url = f"https://tourvisor.ru/xml/modsearch.php?datefrom={df_str}&dateto={dt_str}&directflight=0&regular=1&nightsfrom=10&nightsto=10&adults=2&child=2&childage1=7&childage2=14&meal=7,9&rating=4.5&stars=5,6&country=4&departure=3&pricefrom=0&priceto=0&currency=0&formmode=0&pricetype=0"
+def fetch_search_results(df_str, dt_str, extra_hotels=""):
+    hotels_param = f"&hotels={extra_hotels}" if extra_hotels else ""
+    search_url = f"https://tourvisor.ru/xml/modsearch.php?datefrom={df_str}&dateto={dt_str}&directflight=0&regular=1&nightsfrom=10&nightsto=10&adults=2&child=2&childage1=7&childage2=14&meal=7,9&rating=4.5&stars=5,6&country=4&departure=3&pricefrom=0&priceto=0&currency=0&formmode=0&pricetype=0{hotels_param}"
 
     try:
         resp = requests.get(search_url, headers=HEADERS, timeout=30)
@@ -59,7 +81,7 @@ def fetch_tours():
     print(f"Request ID: {reqid}, polling...")
 
     hotels = []
-    for _ in range(25): # poll up to ~50s
+    for _ in range(25):
         time.sleep(2)
         res_url = f"https://tourvisor.ru/xml/result.php?requestid={reqid}&type=result&format=json"
         try:
@@ -74,10 +96,9 @@ def fetch_tours():
             print("Error polling:", e)
             continue
 
-    if not hotels:
-        print("Failed to get results or search timed out.")
-        return []
+    return hotels
 
+def extract_tours(hotels):
     tours = []
     for h in hotels:
         flydate = ""
@@ -95,11 +116,46 @@ def fetch_tours():
             'price': h.get('price'),
             'flydate': flydate,
             'link': tour_link,
-            'rating': h.get('hotelrating')
+            'rating': h.get('hotelrating'),
+            'manual': False
         })
+    return tours
 
-    tours.sort(key=lambda x: x['price'])
-    return tours[:15]
+def fetch_tours():
+    today = datetime.date.today()
+    date_from = today + datetime.timedelta(days=30)
+    date_to = date_from + datetime.timedelta(days=7)
+
+    df_str = date_from.strftime("%d.%m.%Y")
+    dt_str = date_to.strftime("%d.%m.%Y")
+
+    print(f"Searching standard tours from {df_str} to {dt_str}...")
+
+    raw_hotels = fetch_search_results(df_str, dt_str)
+    all_tours = extract_tours(raw_hotels)
+    all_tours.sort(key=lambda x: x['price'])
+
+    # User requested: Skip first 10, keep next 15
+    selected_tours = all_tours[10:25]
+
+    # Check for manual hotels
+    conn = sqlite3.connect('tours.db')
+    c = conn.cursor()
+    c.execute('SELECT hotel_id FROM manual_hotels')
+    manual_ids = [str(row[0]) for row in c.fetchall()]
+    conn.close()
+
+    if manual_ids:
+        print(f"Searching manual hotels: {manual_ids}")
+        manual_hotels_raw = fetch_search_results(df_str, dt_str, extra_hotels=",".join(manual_ids))
+        manual_tours = extract_tours(manual_hotels_raw)
+
+        for mt in manual_tours:
+            mt['manual'] = True
+
+        selected_tours.extend(manual_tours)
+
+    return selected_tours
 
 def get_chat_id(token, username):
     try:
@@ -142,7 +198,7 @@ def send_telegram(message):
 def send_email(subject, body):
     print(f"[EMAIL to supercuper@mail.ru]:\nSubject: {subject}\nBody: {body}")
 
-def check_and_save_tours(tours):
+def check_and_save_tours(tours, usd_rate):
     if not tours:
         return
 
@@ -167,9 +223,9 @@ def check_and_save_tours(tours):
                 send_email(f"Price Drop: {hotel_name}", msg)
 
         c.execute('''
-            INSERT INTO results (timestamp, hotel_id, hotel_name, price, flydate, link)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (now, hotel_id, hotel_name, current_price, t.get('flydate', ''), t.get('link', '')))
+            INSERT INTO results (timestamp, hotel_id, hotel_name, price, flydate, link, usd_rate)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (now, hotel_id, hotel_name, current_price, t.get('flydate', ''), t.get('link', ''), usd_rate))
 
     conn.commit()
     conn.close()
@@ -206,7 +262,7 @@ def generate_html(tours):
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Top 15 Tours</title>
+    <title>Tours Tracker</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 40px; }
         table { border-collapse: collapse; width: 100%; margin-top: 20px; }
@@ -217,12 +273,29 @@ def generate_html(tours):
         a { color: #027ad0; text-decoration: none; font-weight: bold; }
         a:hover { text-decoration: underline; }
         .chart-container { width: 100%; height: 500px; margin-top: 40px; }
+        .controls { margin-bottom: 20px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; }
+        input[type="text"] { padding: 8px; width: 300px; }
+        button { padding: 8px 15px; background: #027ad0; color: white; border: none; cursor: pointer; }
+        button:hover { background: #025b9c; }
+        .remove-btn { background: #d9534f; padding: 5px 10px; font-size: 0.8em; margin-top: 0; }
+        .remove-btn:hover { background: #c9302c; }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <h2>Top 15 Tours (Turkey from Yekaterinburg, 10 nights)</h2>
-    <p class="update-time">Last updated: {update_time}</p>
+    <h2>Tours Tracker (Turkey from Yekaterinburg, 10 nights)</h2>
+
+    <div class="controls">
+        <form action="/add_hotel" method="post" style="display:inline-block; margin-right:20px;">
+            <input type="text" name="hotel_input" placeholder="Tourvisor Hotel ID or Link..." required>
+            <button type="submit">Добавить отель</button>
+        </form>
+        <form action="/force_update" method="post" style="display:inline-block;">
+            <button type="submit">Принудительно обновить цены</button>
+        </form>
+        <p class="update-time">Last updated: {update_time}</p>
+    </div>
+
     <table>
         <tr>
             <th>Rank</th>
@@ -230,15 +303,22 @@ def generate_html(tours):
             <th>Rating</th>
             <th>Price (RUB)</th>
             <th>Fly Date</th>
+            <th>Action</th>
         </tr>
 """
 
-    for i, t in enumerate(tours, 1):
+    rank = 1
+    for t in tours:
         rating = t.get('rating') or 'N/A'
         hotel_id = t['hotel_id']
+        is_manual = t.get('manual', False)
+
+        display_rank = "Manual" if is_manual else rank
+        if not is_manual:
+            rank += 1
 
         # Get history from DB
-        c.execute('SELECT timestamp, price FROM results WHERE hotel_id = ? ORDER BY timestamp DESC LIMIT 10', (hotel_id,))
+        c.execute('SELECT timestamp, price, usd_rate FROM results WHERE hotel_id = ? ORDER BY timestamp DESC LIMIT 10', (hotel_id,))
         rows = c.fetchall()
 
         history_tooltip = "Price History:&#10;"
@@ -246,7 +326,12 @@ def generate_html(tours):
             for row in rows:
                 dt_obj = datetime.datetime.fromisoformat(row[0])
                 formatted_date = dt_obj.strftime("%d.%m.%Y %H:%M")
-                history_tooltip += f"{formatted_date}: {row[1]:,} RUB&#10;"
+                usd_rate = row[2]
+
+                if usd_rate:
+                    history_tooltip += f"{formatted_date}: {row[1]:,} RUB (USD: {usd_rate})&#10;"
+                else:
+                    history_tooltip += f"{formatted_date}: {row[1]:,} RUB&#10;"
         else:
             history_tooltip += "No previous data."
 
@@ -265,12 +350,17 @@ def generate_html(tours):
             'tension': 0.1
         })
 
+        action_html = ""
+        if is_manual:
+            action_html = f'<form action="/remove_hotel" method="post"><input type="hidden" name="hotel_id" value="{hotel_id}"><button type="submit" class="remove-btn">Удалить</button></form>'
+
         html += f"""        <tr>
-            <td>{i}</td>
+            <td>{display_rank}</td>
             <td><a href="{t['link']}" target="_blank" title="{history_tooltip}">{t['hotel_name']}</a></td>
             <td>{rating}</td>
             <td>{t['price']:,}</td>
             <td>{t['flydate']}</td>
+            <td>{action_html}</td>
         </tr>
 """
 
@@ -379,21 +469,66 @@ def generate_html(tours):
 def run_job():
     print(f"[{datetime.datetime.now()}] Running scheduled job...")
     res = fetch_tours()
+    usd_rate = get_usd_rate()
     if res:
-        check_and_save_tours(res)
+        check_and_save_tours(res, usd_rate)
         generate_html(res)
     else:
         print("No tours found.")
 
-if __name__ == "__main__":
-    init_db()
+@app.route('/')
+def index():
+    try:
+        with open("index.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "Not generated yet. Please wait or force update."
 
-    # Run once at startup
-    run_job()
+@app.route('/add_hotel', methods=['POST'])
+def add_hotel():
+    hotel_input = request.form.get('hotel_input', '')
+    hotel_id = ""
+    # Extract ID from link if provided, otherwise assume it's an ID
+    if "hotel=" in hotel_input:
+        hotel_id = hotel_input.split("hotel=")[-1].split("&")[0].split("#")[0]
+    else:
+        hotel_id = hotel_input.strip()
 
+    if hotel_id.isdigit():
+        conn = sqlite3.connect('tours.db')
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO manual_hotels (hotel_id) VALUES (?)', (int(hotel_id),))
+        conn.commit()
+        conn.close()
+
+        # Trigger an immediate run in a background thread so UI doesn't block
+        threading.Thread(target=run_job, daemon=True).start()
+
+    return "<script>window.history.back();</script>"
+
+@app.route('/remove_hotel', methods=['POST'])
+def remove_hotel():
+    hotel_id = request.form.get('hotel_id')
+    if hotel_id and hotel_id.isdigit():
+        conn = sqlite3.connect('tours.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM manual_hotels WHERE hotel_id = ?', (int(hotel_id),))
+        conn.commit()
+        conn.close()
+
+        # Trigger immediate run to update table
+        threading.Thread(target=run_job, daemon=True).start()
+
+    return "<script>window.history.back();</script>"
+
+@app.route('/force_update', methods=['POST'])
+def force_update():
+    threading.Thread(target=run_job, daemon=True).start()
+    return "<script>window.history.back();</script>"
+
+
+def run_schedule():
     import os
-    # Schedule logic - assuming script runs on UTC time, this corresponds to 07:00 and 18:00 MSK (UTC+3)
-    # Alternatively user can set SCHEDULE_TIME_1 and SCHEDULE_TIME_2 based on server timezone
     t1 = os.environ.get("SCHEDULE_TIME_1", "04:00")
     t2 = os.environ.get("SCHEDULE_TIME_2", "15:00")
     schedule.every().day.at(t1).do(run_job)
@@ -403,3 +538,16 @@ if __name__ == "__main__":
     while True:
         schedule.run_pending()
         time.sleep(60)
+
+if __name__ == "__main__":
+    init_db()
+
+    # Run once at startup
+    run_job()
+
+    # Start scheduler in a background thread
+    t = threading.Thread(target=run_schedule, daemon=True)
+    t.start()
+
+    # Start Flask app
+    app.run(host='127.0.0.1', port=5001)
