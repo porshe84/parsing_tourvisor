@@ -93,20 +93,43 @@ def fetch_tours():
             'hotel_name': h.get('hotelname'),
             'price': h.get('price'),
             'flydate': flydate,
-            'link': tour_link
+            'link': tour_link,
+            'rating': h.get('hotelrating')
         })
 
     tours.sort(key=lambda x: x['price'])
     return tours[:15]
 
+def get_chat_id(token, username):
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=10).json()
+        for res in r.get("result", []):
+            msg = res.get("message", {})
+            chat = msg.get("chat", {})
+            if chat.get("username") == username.lstrip('@'):
+                return chat.get("id")
+    except:
+        pass
+    return None
+
 def send_telegram(message):
     print(f"[TELEGRAM to @ehsrop48]:\n{message}")
     import os
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
+
     if not token:
         print("Error: TELEGRAM_BOT_TOKEN environment variable not set.")
         return
-    chat_id = '@ehsrop48'
+
+    # Try to resolve chat_id from username if user has sent a message to the bot
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    if not chat_id:
+        chat_id = get_chat_id(token, 'ehsrop48')
+
+    if not chat_id:
+        print("Telegram Error: Could not resolve numeric chat_id for @ehsrop48. Please send a message to the bot first, or set TELEGRAM_CHAT_ID env var.")
+        return
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
         resp = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=10)
@@ -155,6 +178,9 @@ def generate_html(tours):
     if not tours:
         return
 
+    conn = sqlite3.connect('tours.db')
+    c = conn.cursor()
+
     html = """<!DOCTYPE html>
 <html>
 <head>
@@ -178,19 +204,39 @@ def generate_html(tours):
         <tr>
             <th>Rank</th>
             <th>Hotel</th>
+            <th>Rating</th>
             <th>Price (RUB)</th>
             <th>Fly Date</th>
         </tr>
 """
 
     for i, t in enumerate(tours, 1):
+        rating = t.get('rating') or 'N/A'
+        hotel_id = t['hotel_id']
+
+        # Get history from DB
+        c.execute('SELECT timestamp, price FROM results WHERE hotel_id = ? ORDER BY timestamp DESC LIMIT 10', (hotel_id,))
+        rows = c.fetchall()
+
+        history_tooltip = "Price History:&#10;"
+        if rows:
+            for row in rows:
+                dt_obj = datetime.datetime.fromisoformat(row[0])
+                formatted_date = dt_obj.strftime("%d.%m.%Y %H:%M")
+                history_tooltip += f"{formatted_date}: {row[1]:,} RUB&#10;"
+        else:
+            history_tooltip += "No previous data."
+
         html += f"""        <tr>
             <td>{i}</td>
-            <td><a href="{t['link']}" target="_blank">{t['hotel_name']}</a></td>
+            <td><a href="{t['link']}" target="_blank" title="{history_tooltip}">{t['hotel_name']}</a></td>
+            <td>{rating}</td>
             <td>{t['price']:,}</td>
             <td>{t['flydate']}</td>
         </tr>
 """
+
+    conn.close()
 
     html += """    </table>
 </body>
