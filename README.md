@@ -13,17 +13,23 @@
 
 ## Установка и локальный запуск
 
-1. Установите зависимости:
+1. Создайте и активируйте виртуальное окружение:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+2. Установите зависимости (внутри активированного окружения):
    ```bash
    pip install requests schedule flask
    ```
 
-2. Задайте токен вашего Telegram-бота:
+3. Задайте токен вашего Telegram-бота:
    ```bash
    export TELEGRAM_BOT_TOKEN="Ваш_Токен_Здесь"
    ```
 
-3. Запустите Flask-приложение:
+4. Запустите Flask-приложение:
    ```bash
    python3 app.py
    ```

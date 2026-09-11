@@ -34,13 +34,22 @@ def init_db():
             price INTEGER,
             flydate TEXT,
             link TEXT,
-            usd_rate REAL
+            usd_rate REAL,
+            search_df TEXT,
+            search_dt TEXT
         )
     ''')
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS manual_hotels (
             hotel_id INTEGER PRIMARY KEY
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
     ''')
 
@@ -57,8 +66,39 @@ def init_db():
         c.execute('ALTER TABLE results ADD COLUMN usd_rate REAL')
     except sqlite3.OperationalError:
         pass
+    try:
+        c.execute('ALTER TABLE results ADD COLUMN search_df TEXT')
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute('ALTER TABLE results ADD COLUMN search_dt TEXT')
+    except sqlite3.OperationalError:
+        pass
+
+    # Initialize default settings if empty
+    c.execute('SELECT COUNT(*) FROM settings')
+    if c.fetchone()[0] == 0:
+        today = datetime.date.today()
+        date_from = today + datetime.timedelta(days=30)
+        date_to = date_from + datetime.timedelta(days=7)
+        c.execute("INSERT INTO settings (key, value) VALUES ('search_df', ?)", (date_from.strftime('%d.%m.%Y'),))
+        c.execute("INSERT INTO settings (key, value) VALUES ('search_dt', ?)", (date_to.strftime('%d.%m.%Y'),))
+
     conn.commit()
     conn.close()
+
+def get_search_dates():
+    conn = sqlite3.connect('tours.db')
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key='search_df'")
+    row_df = c.fetchone()
+    c.execute("SELECT value FROM settings WHERE key='search_dt'")
+    row_dt = c.fetchone()
+    conn.close()
+
+    df_str = row_df[0] if row_df else ""
+    dt_str = row_dt[0] if row_dt else ""
+    return df_str, dt_str
 
 def get_usd_rate():
     try:
@@ -122,12 +162,7 @@ def extract_tours(hotels):
     return tours
 
 def fetch_tours():
-    today = datetime.date.today()
-    date_from = today + datetime.timedelta(days=30)
-    date_to = date_from + datetime.timedelta(days=7)
-
-    df_str = date_from.strftime("%d.%m.%Y")
-    dt_str = date_to.strftime("%d.%m.%Y")
+    df_str, dt_str = get_search_dates()
 
     print(f"Searching standard tours from {df_str} to {dt_str}...")
 
@@ -205,13 +240,15 @@ def check_and_save_tours(tours, usd_rate):
     conn = sqlite3.connect('tours.db')
     c = conn.cursor()
     now = datetime.datetime.now().isoformat()
+    df_str, dt_str = get_search_dates()
 
     for t in tours:
         hotel_id = t['hotel_id']
         current_price = t['price']
         hotel_name = t['hotel_name']
 
-        c.execute('SELECT MIN(price) FROM results WHERE hotel_id = ?', (hotel_id,))
+        # Only compare minimums for the currently active search date range
+        c.execute('SELECT MIN(price) FROM results WHERE hotel_id = ? AND search_df = ? AND search_dt = ?', (hotel_id, df_str, dt_str))
         row = c.fetchone()
         min_price = row[0]
 
@@ -223,9 +260,9 @@ def check_and_save_tours(tours, usd_rate):
                 send_email(f"Price Drop: {hotel_name}", msg)
 
         c.execute('''
-            INSERT INTO results (timestamp, hotel_id, hotel_name, price, flydate, link, usd_rate)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (now, hotel_id, hotel_name, current_price, t.get('flydate', ''), t.get('link', ''), usd_rate))
+            INSERT INTO results (timestamp, hotel_id, hotel_name, price, flydate, link, usd_rate, search_df, search_dt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (now, hotel_id, hotel_name, current_price, t.get('flydate', ''), t.get('link', ''), usd_rate, df_str, dt_str))
 
     conn.commit()
     conn.close()
@@ -238,16 +275,17 @@ def generate_html(tours):
     conn = sqlite3.connect('tours.db')
     c = conn.cursor()
 
+    df_str, dt_str = get_search_dates()
     hotel_ids = [str(t['hotel_id']) for t in tours]
     placeholders = ','.join('?' * len(hotel_ids))
 
-    # Extract unique timestamps for the shared X-axis
+    # Extract unique timestamps for the shared X-axis, scoped to current search date
     c.execute(f'''
         SELECT DISTINCT timestamp
         FROM results
-        WHERE hotel_id IN ({placeholders})
+        WHERE hotel_id IN ({placeholders}) AND search_df = ? AND search_dt = ?
         ORDER BY timestamp ASC
-    ''', hotel_ids)
+    ''', (*hotel_ids, df_str, dt_str))
 
     raw_timestamps = [row[0] for row in c.fetchall()]
     # Format labels for the chart
@@ -258,27 +296,39 @@ def generate_html(tours):
 
     chart_datasets = []
 
-    html = """<!DOCTYPE html>
+    # Convert active df/dt strings back to YYYY-MM-DD for the HTML input values
+    try:
+        html_df = datetime.datetime.strptime(df_str, "%d.%m.%Y").strftime("%Y-%m-%d")
+        html_dt = datetime.datetime.strptime(dt_str, "%d.%m.%Y").strftime("%Y-%m-%d")
+    except:
+        html_df = ""
+        html_dt = ""
+
+    html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <title>Tours Tracker</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        th { background-color: #027ad0; color: white; }
-        tr:nth-child(even) { background-color: #f2f2f2; }
-        .update-time { color: #555; font-size: 0.9em; }
-        a { color: #027ad0; text-decoration: none; font-weight: bold; }
-        a:hover { text-decoration: underline; }
-        .chart-container { width: 100%; height: 500px; margin-top: 40px; }
-        .controls { margin-bottom: 20px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; }
-        input[type="text"] { padding: 8px; width: 300px; }
-        button { padding: 8px 15px; background: #027ad0; color: white; border: none; cursor: pointer; }
-        button:hover { background: #025b9c; }
-        .remove-btn { background: #d9534f; padding: 5px 10px; font-size: 0.8em; margin-top: 0; }
-        .remove-btn:hover { background: #c9302c; }
+        body {{ font-family: Arial, sans-serif; margin: 40px; }}
+        table {{ border-collapse: collapse; width: 100%; margin-top: 20px; }}
+        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: middle; }}
+        th {{ background-color: #027ad0; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .update-time {{ color: #555; font-size: 0.9em; }}
+        a {{ color: #027ad0; text-decoration: none; font-weight: bold; vertical-align: middle; }}
+        a:hover {{ text-decoration: underline; }}
+        .chart-container {{ width: 100%; height: 500px; margin-top: 40px; }}
+        .controls {{ margin-bottom: 20px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; display: flex; flex-wrap: wrap; gap: 20px; align-items: center; }}
+        .control-group {{ border-right: 1px solid #ccc; padding-right: 20px; }}
+        .control-group:last-child {{ border-right: none; }}
+        input[type="text"], input[type="date"] {{ padding: 8px; }}
+        input[type="text"] {{ width: 250px; }}
+        button {{ padding: 8px 15px; background: #027ad0; color: white; border: none; cursor: pointer; }}
+        button:hover {{ background: #025b9c; }}
+        .remove-btn {{ background: #d9534f; padding: 5px 10px; font-size: 0.8em; margin-top: 0; }}
+        .remove-btn:hover {{ background: #c9302c; }}
+        .rating-badge {{ display: inline-block; background-color: #5cb85c; color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-left: 10px; vertical-align: middle; }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -286,21 +336,37 @@ def generate_html(tours):
     <h2>Tours Tracker (Turkey from Yekaterinburg, 10 nights)</h2>
 
     <div class="controls">
-        <form action="/add_hotel" method="post" style="display:inline-block; margin-right:20px;">
-            <input type="text" name="hotel_input" placeholder="Tourvisor Hotel ID or Link..." required>
-            <button type="submit">Добавить отель</button>
-        </form>
-        <form action="/force_update" method="post" style="display:inline-block;">
-            <button type="submit">Принудительно обновить цены</button>
-        </form>
-        <p class="update-time">Last updated: {update_time}</p>
+        <div class="control-group">
+            <form action="/update_dates" method="post">
+                <strong>Даты вылета:</strong>
+                <input type="date" name="date_from" value="{html_df}" required> -
+                <input type="date" name="date_to" value="{html_dt}" required>
+                <button type="submit">Изменить интервал</button>
+            </form>
+        </div>
+
+        <div class="control-group">
+            <form action="/add_hotel" method="post">
+                <input type="text" name="hotel_input" placeholder="Tourvisor Hotel ID or Link..." required>
+                <button type="submit">Добавить отель</button>
+            </form>
+        </div>
+
+        <div class="control-group">
+            <form action="/force_update" method="post">
+                <button type="submit">Принудительно обновить цены</button>
+            </form>
+        </div>
+
+        <div class="control-group">
+            <p class="update-time" style="margin: 0;">Last updated: {{update_time}}</p>
+        </div>
     </div>
 
     <table>
         <tr>
             <th>Rank</th>
             <th>Hotel</th>
-            <th>Rating</th>
             <th>Price (RUB)</th>
             <th>Fly Date</th>
             <th>Action</th>
@@ -317,8 +383,8 @@ def generate_html(tours):
         if not is_manual:
             rank += 1
 
-        # Get history from DB
-        c.execute('SELECT timestamp, price, usd_rate FROM results WHERE hotel_id = ? ORDER BY timestamp DESC LIMIT 10', (hotel_id,))
+        # Get history from DB scoped to current search date
+        c.execute('SELECT timestamp, price, usd_rate FROM results WHERE hotel_id = ? AND search_df = ? AND search_dt = ? ORDER BY timestamp DESC LIMIT 10', (hotel_id, df_str, dt_str))
         rows = c.fetchall()
 
         history_tooltip = "Price History:&#10;"
@@ -335,8 +401,8 @@ def generate_html(tours):
         else:
             history_tooltip += "No previous data."
 
-        # Build dataset for chart
-        c.execute('SELECT timestamp, price FROM results WHERE hotel_id = ? ORDER BY timestamp ASC', (hotel_id,))
+        # Build dataset for chart scoped to current search date
+        c.execute('SELECT timestamp, price FROM results WHERE hotel_id = ? AND search_df = ? AND search_dt = ? ORDER BY timestamp ASC', (hotel_id, df_str, dt_str))
         hotel_history = {row[0]: row[1] for row in c.fetchall()}
 
         data_points = []
@@ -356,8 +422,10 @@ def generate_html(tours):
 
         html += f"""        <tr>
             <td>{display_rank}</td>
-            <td><a href="{t['link']}" target="_blank" title="{history_tooltip}">{t['hotel_name']}</a></td>
-            <td>{rating}</td>
+            <td>
+                <a href="{t['link']}" target="_blank" title="{history_tooltip}">{t['hotel_name']}</a>
+                <span class="rating-badge">{rating}</span>
+            </td>
             <td>{t['price']:,}</td>
             <td>{t['flydate']}</td>
             <td>{action_html}</td>
@@ -457,7 +525,7 @@ def generate_html(tours):
 </body>
 </html>"""
 
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     html = html.replace("{update_time}", now)
     html = html.replace("{chart_labels_json}", json.dumps(chart_labels))
     html = html.replace("{chart_datasets_json}", json.dumps(chart_datasets))
@@ -488,9 +556,20 @@ def index():
 def add_hotel():
     hotel_input = request.form.get('hotel_input', '')
     hotel_id = ""
+    hotel_name = "Unknown Hotel"
+
     # Extract ID from link if provided, otherwise assume it's an ID
     if "hotel=" in hotel_input:
         hotel_id = hotel_input.split("hotel=")[-1].split("&")[0].split("#")[0]
+    elif "tvtourid=" in hotel_input:
+        tour_id = hotel_input.split("tvtourid=")[-1].split("&")[0].split("#")[0]
+        try:
+            r = requests.get(f"https://tourvisor.ru/xml/actualize.php?tourid={tour_id}&format=json", headers=HEADERS, timeout=10)
+            data = r.json()
+            hotel_id = data.get('data', {}).get('tour', {}).get('hotelcode', '')
+            hotel_name = data.get('data', {}).get('tour', {}).get('hotelname', 'Unknown Hotel')
+        except:
+            pass
     else:
         hotel_id = hotel_input.strip()
 
@@ -500,6 +579,9 @@ def add_hotel():
         c.execute('INSERT OR IGNORE INTO manual_hotels (hotel_id) VALUES (?)', (int(hotel_id),))
         conn.commit()
         conn.close()
+
+        msg = f"✅ Добавлен новый отель для отслеживания!\nID: {hotel_id}\nНазвание: {hotel_name}"
+        send_telegram(msg)
 
         # Trigger an immediate run in a background thread so UI doesn't block
         threading.Thread(target=run_job, daemon=True).start()
@@ -526,6 +608,35 @@ def force_update():
     threading.Thread(target=run_job, daemon=True).start()
     return "<script>window.history.back();</script>"
 
+@app.route('/update_dates', methods=['POST'])
+def update_dates():
+    df_input = request.form.get('date_from')
+    dt_input = request.form.get('date_to')
+
+    if df_input and dt_input:
+        # Expected format from HTML5 input type="date" is YYYY-MM-DD
+        try:
+            df_obj = datetime.datetime.strptime(df_input, "%Y-%m-%d")
+            dt_obj = datetime.datetime.strptime(dt_input, "%Y-%m-%d")
+
+            df_str = df_obj.strftime("%d.%m.%Y")
+            dt_str = dt_obj.strftime("%d.%m.%Y")
+
+            conn = sqlite3.connect('tours.db')
+            c = conn.cursor()
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('search_df', ?)", (df_str,))
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('search_dt', ?)", (dt_str,))
+            conn.commit()
+            conn.close()
+
+            msg = f"📅 Даты поиска изменены:\nС {df_str} по {dt_str}"
+            send_telegram(msg)
+
+            threading.Thread(target=run_job, daemon=True).start()
+        except ValueError:
+            pass
+
+    return "<script>window.history.back();</script>"
 
 def run_schedule():
     import os
