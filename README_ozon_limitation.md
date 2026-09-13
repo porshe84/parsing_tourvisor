@@ -1,0 +1,1 @@
+The user requested Ozon marketplace tracking. However, investigation revealed that the Ozon Seller API only returns data for products owned by the authenticated seller account, not arbitrary marketplace links. We aborted the implementation and reverted to the Tourvisor version.
